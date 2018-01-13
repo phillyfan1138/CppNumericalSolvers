@@ -2,124 +2,104 @@
 #ifndef NELDERMEADSOLVER_H_
 #define NELDERMEADSOLVER_H_
 #include <cmath>
-#include <Eigen/Core>
-#include "isolver.h"
-#include "../meta.h"
+#include "FunctionalUtilities.h"
+
 
 namespace cppoptlib {
+  template <typename T>
+  auto getColumnAsVector(const std::vector<T>& vM, int col, int numRows){
+    auto first = vM.begin() + col*numRows;
+    auto last = first+numRows;
+    std::vector<T> newVec(first, last);
+    return newVec;
+  }
+  template <typename T>
+  auto getItemAt(int row, int col, int numRows, const std::vector<T>& vM){
+    return vM[col*numRows+row];
+  }
+  template <typename T>
+  auto setItemAt(int row, int col, int numRows, const T& item, std::vector<T>&& vM){
+    vM[col*numRows+row]=item;
+    return std::move(vM);
+  }
 
-template<typename ProblemType>
-class NelderMeadSolver : public ISolver<ProblemType, 0> {
- public:
-  using Superclass = ISolver<ProblemType, 0>;
-  using typename Superclass::Scalar;
-  using typename Superclass::TVector;
-  using MatrixType = Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
-  MatrixType x0;
-  SimplexOp lastOp = SimplexOp::Place;
-  Status stop_condition;
-  bool initialSimplexCreated = false;
-
-  MatrixType makeInitialSimplex(TVector &x) {
-    size_t DIM = x.rows();
-
-    MatrixType s = MatrixType::Zero(DIM, DIM + 1);
-    for (int c = 0; c < int(DIM) + 1; ++c) {
-      for (int r = 0; r < int(DIM); ++r) {
-        s(r, c) = x(r);
+  template<typename T>
+  std::vector<T> makeInitialSimplex(const std::vector<T> &x) { 
+    const int numRows = x.size();
+    const int numCols=numRows+1;
+    std::vector<T> s=std::vector<T>(numRows*numCols, 0.0);
+    for (int c = 0; c < numCols; ++c) {
+      for (int r = 0; r < numRows; ++r) {
+        s=setItemAt(r, c, numRows, x[r], std::move(s));
         if (r == c - 1) {
-          if (x(r) == 0) {
-            s(r, c) = 0.00025;
+          if (x[r] == 0) {
+            s=setItemAt(r, c, numRows, .00025, std::move(s));
           } else {
-            s(r, c) = (1 + 0.05) * x(r);
+            s=setItemAt(r, c, numRows, (1 + 0.05) * x[r], std::move(s));
           }
         }
       }
     }
-
     return s;
   }
+  template<typename T>
+  T getMaxCoef(const std::vector<T>& col){
+    return futilities::reduce_to_single(col, [](const auto& prev, const auto& val, const auto& index){
+      return prev>val?prev:val;
+    });
+  }
+  template<typename T>
+  T getMaxCoefOfDiff(std::vector<T>&& col1, std::vector<T>&& col2){
+    return getMaxCoef(futilities::for_each_parallel(col1, [&](const auto& val, const auto& index){
+      return fabs(val-col2[index]);
+    }));
+  }
 
-  /**
-   * @brief minimize
-   * @details [long description]
-   *
-   * @param objFunc [description]
-   */
-  void minimize(ProblemType &objFunc, TVector &x) {
-
-    const Scalar rho = 1.;    // rho > 0
-    const Scalar xi  = 2.;    // xi  > max(rho, 1)
-    const Scalar gam = 0.5;   // 0 < gam < 1
-
-    const size_t DIM = x.rows();
-
+/*
+  template<typename ObjFunc, typename T >
+  void minimize(ObjFunc &&objFunc, const std::vector<T> &x, const int maxIter) {
+    const T rho = 1.;    // rho > 0
+    const T xi  = 2.;    // xi  > max(rho, 1)
+    const T gam = 0.5;   // 0 < gam < 1
+    const int numRows = x.rows();
+    const int numCols=numRows+1;
     // create initial simplex
-    if (not initialSimplexCreated) {
-      x0 = makeInitialSimplex(x);
-    }
-
+    auto x0 = makeInitialSimplex(x);
     // compute function values
-    std::vector<Scalar> f; f.resize(DIM + 1);
-    std::vector<int> index; index.resize(DIM + 1);
-    for (int i = 0; i < int(DIM) + 1; ++i) {
-      f[i] = objFunc(static_cast<TVector >(x0.col(i)));
-      index[i] = i;
-    }
-
+    auto f=futilities::for_each_parallel(0, numCols, [&](const auto& ind){
+      return objFunc(getColumnAsVector(x0, ind, numRows));
+    });
+    auto index=futilities::for_each_parallel(0, numCols, [&](const auto& ind){
+      return ind;
+    });
     sort(index.begin(), index.end(), [&](int a, int b)-> bool { return f[a] < f[b]; });
-
     int iter = 0;
-    const int maxIter = this->m_stop.iterations * DIM;
     while (
-      objFunc.callback(this->m_current, x0.col(index[0])) and
-      (iter < maxIter)
+      (iter < maxIter) && 
     ) {
       // conv-check
-      Scalar max1 = fabs(f[index[1]] - f[index[0]]);
-      Scalar max2 = (x0.col(index[1]) - x0.col(index[0]) ).array().abs().maxCoeff();
-      for (int i = 2; i < int(DIM) + 1; ++i) {
-        Scalar tmp1 = fabs(f[index[i]] - f[index[0]]);
-        if (tmp1 > max1)
-          max1 = tmp1;
+      T maxFn=futilities::reduce_to_single(f, [&](const auto& prev, const auto& val, const auto& ind){
+        auto currDif=fabs(val-f[index[0]]);
+        return prev>currDif?prev:currDif;
+      });
+      T maxCoef=futilities::reduce_to_single(index, [&](const auto& prev, const auto& val, const auto& ind){
+        auto currDif=getMaxCoefOfDiff(getColumnAsVector(x0, val, numRows), getColumnAsVector(x0, index[0], numRows));
+        return prev>currDif?prev:currDif;
+      });
 
-        Scalar tmp2 = (x0.col(index[i]) - x0.col(index[0]) ).array().abs().maxCoeff();
-        if (tmp2 > max2)
-          max2 = tmp2;
-      }
-      const Scalar tt1 = std::max(Scalar(1.e-04), 10 * std::nextafter(f[index[0]], std::numeric_limits<Scalar>::epsilon()) - f[index[0]]);
-      const Scalar tt2 = std::max(Scalar(1.e-04), 10 * (std::nextafter(x0.col(index[0]).maxCoeff(), std::numeric_limits<Scalar>::epsilon())
-                    - x0.col(index[0]).maxCoeff()));
+      const T tt1 = std::max(T(1.e-04), 10 * std::nextafter(f[index[0]], std::numeric_limits<T>::epsilon()) - f[index[0]]);
+      const T tt2 = std::max(T(1.e-04), 10 * (std::nextafter(getMaxCoef(getColumnAsVector(x0, 0, numRows)) , std::numeric_limits<T>::epsilon())- getMaxCoef(getColumnAsVector(x0, 0, numRows)));
 
-      // User-defined stopping criteria
-      this->m_current.iterations = iter;
-      this->m_current.fDelta = max1;
-      this->m_current.xDelta = max2;
-      stop_condition = checkConvergence(this->m_stop, this->m_current);
-      if (this->m_stop.iterations != 0 and stop_condition != Status::Continue) {
-        break;
-      }
 
-      // Allow stopping in the callback. This callback gets the correct current
-      // state unlike the simple one in while(), which get previous state.
-      if (objFunc.detailed_callback(this->m_current, lastOp, index[0], x0, f) == false) {
-        stop_condition = Status::UserDefined;
-        break;
-      }
+      //maxFn and maxCoef are used for stopping criteria...if gets to certain size, stop
+      //compare maxFn to tt1 and maxCoef to tt2....if both are smaller than corresponding tt, then stop
 
-      // max(||x - shift(x) ||_inf ) <= tol,
-      if (max1 <=  tt1) {
-        // values to similar
-        if (max2 <= tt2) {
-          stop_condition = Status::FDeltaTolerance;
-          break;
-        }
-      }
+     
 
       //////////////////////////
 
       // midpoint of the simplex opposite the worst point
-      TVector x_bar = TVector::Zero(DIM);
+      std::vector<T> x_bar = std::vector<T>(numRows);
       for (int i = 0; i < int(DIM); ++i) {
         x_bar += x0.col(index[i]);
       }
@@ -217,9 +197,9 @@ class NelderMeadSolver : public ISolver<ProblemType, 0> {
     }
     return Status::Continue;
   }
+*/
 
-}; /* class NelderMeadSolver */
 
-} /* namespace cppoptlib */
+}
 
-#endif /* NELDERMEADSOLVER_H_ */
+#endif 
