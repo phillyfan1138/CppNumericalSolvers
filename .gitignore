@@ -2,3 +2,4 @@ src
 *.gcda
 *.gcno
 *.o
+test
